@@ -67,6 +67,14 @@ builder.Services.AddSingleton<ITargetAvailabilityService>(sp =>
             "targets.json"),
         sp.GetRequiredService<ILogger<TargetAvailabilityService>>()));
 
+var disableTui = args.Any(a => string.Equals(a, "--no-tui", StringComparison.OrdinalIgnoreCase));
+if (disableTui)
+{
+    ollamaOptions.TerminalMonitoring.Enabled = false;
+    builder.Services.PostConfigure<OllamaRouterOptions>(opt => opt.TerminalMonitoring.Enabled = false);
+}
+builder.Services.AddHostedService<TerminalMonitoringHostedService>();
+
 var app = builder.Build();
 
 // Ensure local Ollama is running (Windows only).
@@ -90,13 +98,16 @@ app.MapOllamaMonitorEndpoints();
 // 3. YARP CATCH-ALL
 app.MapReverseProxy();
 
-// Print a clickable link to the monitoring UI once the server has started.
+// Print a clickable link to the monitoring UI once the server has started (fallback when TUI is disabled).
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     var monitorUrl = ollamaOptions.BindAddress.TrimEnd('/').Replace("+", "localhost") + "/monitor";
-    Console.WriteLine("✅ Ollama Router is running");
-    Console.WriteLine();
-    Console.WriteLine($"📊 Activity monitor available at: {monitorUrl}");
+    if (!ollamaOptions.TerminalMonitoring.Enabled || Console.IsOutputRedirected)
+    {
+        Console.WriteLine("✅ Ollama Router is running");
+        Console.WriteLine();
+        Console.WriteLine($"📊 Activity monitor available at: {monitorUrl}");
+    }
 });
 
 // Listen on the configured address (defaults to the standard Ollama port).

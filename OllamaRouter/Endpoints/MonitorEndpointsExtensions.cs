@@ -25,54 +25,14 @@ public static class MonitorEndpointsExtensions
             IModelCatalogCacheService modelCatalogCache,
             CancellationToken cancellationToken) =>
         {
-            var snapshot = activityMonitor.GetSnapshot();
-            var statistics = activityStatistics.GetSnapshot();
-            var now = DateTimeOffset.UtcNow;
-            var cloudEnabled = options.Value.Models.Values.Any(m => !string.IsNullOrEmpty(m.CloudModel));
-            var targets = targetAvailability.GetSnapshot();
-
-            var localOnline = !string.IsNullOrWhiteSpace(options.Value.LocalUrl) &&
-                              await modelCatalogCache.HasAnyModelsAsync(options.Value.LocalUrl, cancellationToken);
-            var remoteOnline = !string.IsNullOrWhiteSpace(options.Value.RemoteUrl) &&
-                               await modelCatalogCache.HasAnyModelsAsync(options.Value.RemoteUrl, cancellationToken);
-
-            var monitorResponse = new MonitorStateResponse(
-                cloudEnabled,
-                new MonitorTargetsStatus(targets.Local, targets.Remote, targets.Cloud),
-                new MonitorTargetsStatus(localOnline, remoteOnline, cloudEnabled),
-                new MonitorBusyStatus(
-                    snapshot.Busy.GetValueOrDefault(RoutingTarget.Local),
-                    snapshot.Busy.GetValueOrDefault(RoutingTarget.Remote),
-                    snapshot.Busy.GetValueOrDefault(RoutingTarget.Cloud)),
-                new MonitorStatisticsStatus(
-                    new MonitorPeriodStatistics(
-                        statistics.Today[RoutingTarget.Local],
-                        statistics.Today[RoutingTarget.Remote],
-                        statistics.Today[RoutingTarget.Cloud],
-                        statistics.TodayTotal),
-                    new MonitorPeriodStatistics(
-                        statistics.Last7Days[RoutingTarget.Local],
-                        statistics.Last7Days[RoutingTarget.Remote],
-                        statistics.Last7Days[RoutingTarget.Cloud],
-                        statistics.Last7DaysTotal)),
-                snapshot.InProgressRequests.Select(r => new MonitorInProgressItem(
-                    r.Target.ToString(),
-                    r.Model,
-                    r.EstimatedPromptTokens,
-                    (now - r.StartedAt).TotalMilliseconds)).ToList(),
-                snapshot.RecentRequests.Select(r => new MonitorRecentRequestItem(
-                    r.Timestamp,
-                    r.Target.ToString(),
-                    r.Model,
-                    r.EstimatedPromptTokens,
-                    r.ActualPromptTokens,
-                    r.ActualResponseTokens,
-                    r.ElapsedMilliseconds,
-                    r.StatusCode,
-                    r.Success,
-                    r.RawPromptTokens)).ToList(),
-                CalculateCostStatus(statistics.Last7Days, options.Value.Pricing),
-                CalculateOverheadStatus(snapshot.RecentRequests, options.Value.TokenEstimationOverheadFactor, options.Value.TokenEstimator));
+            var monitorResponse = await BuildMonitorStateResponseAsync(
+                activityMonitor,
+                activityStatistics,
+                options,
+                targetAvailability,
+                modelCatalogCache,
+                cancellationToken,
+                includeOverhead: true);
 
             return Results.Json(monitorResponse, OllamaRouterJsonSerializerContext.Default.MonitorStateResponse);
         });
@@ -646,6 +606,68 @@ setInterval(refresh, 2000);
 </body>
 </html>
 """;
+
+    public static async Task<MonitorStateResponse> BuildMonitorStateResponseAsync(
+        IActivityMonitorService activityMonitor,
+        IActivityStatisticsService activityStatistics,
+        IOptions<OllamaRouterOptions> options,
+        ITargetAvailabilityService targetAvailability,
+        IModelCatalogCacheService modelCatalogCache,
+        CancellationToken cancellationToken = default,
+        bool includeOverhead = true)
+    {
+        var snapshot = activityMonitor.GetSnapshot();
+        var statistics = activityStatistics.GetSnapshot();
+        var now = DateTimeOffset.UtcNow;
+        var cloudEnabled = options.Value.Models.Values.Any(m => !string.IsNullOrEmpty(m.CloudModel));
+        var targets = targetAvailability.GetSnapshot();
+
+        var localOnline = !string.IsNullOrWhiteSpace(options.Value.LocalUrl) &&
+                          await modelCatalogCache.HasAnyModelsAsync(options.Value.LocalUrl, cancellationToken);
+        var remoteOnline = !string.IsNullOrWhiteSpace(options.Value.RemoteUrl) &&
+                           await modelCatalogCache.HasAnyModelsAsync(options.Value.RemoteUrl, cancellationToken);
+
+        return new MonitorStateResponse(
+            cloudEnabled,
+            new MonitorTargetsStatus(targets.Local, targets.Remote, targets.Cloud),
+            new MonitorTargetsStatus(localOnline, remoteOnline, cloudEnabled),
+            new MonitorBusyStatus(
+                snapshot.Busy.GetValueOrDefault(RoutingTarget.Local),
+                snapshot.Busy.GetValueOrDefault(RoutingTarget.Remote),
+                snapshot.Busy.GetValueOrDefault(RoutingTarget.Cloud)),
+            new MonitorStatisticsStatus(
+                new MonitorPeriodStatistics(
+                    statistics.Today[RoutingTarget.Local],
+                    statistics.Today[RoutingTarget.Remote],
+                    statistics.Today[RoutingTarget.Cloud],
+                    statistics.TodayTotal),
+                new MonitorPeriodStatistics(
+                    statistics.Last7Days[RoutingTarget.Local],
+                    statistics.Last7Days[RoutingTarget.Remote],
+                    statistics.Last7Days[RoutingTarget.Cloud],
+                    statistics.Last7DaysTotal)),
+            snapshot.InProgressRequests.Select(r => new MonitorInProgressItem(
+                r.Target.ToString(),
+                r.Model,
+                r.EstimatedPromptTokens,
+                (now - r.StartedAt).TotalMilliseconds)).ToList(),
+            snapshot.RecentRequests.Select(r => new MonitorRecentRequestItem(
+                r.Timestamp,
+                r.Target.ToString(),
+                r.Model,
+                r.EstimatedPromptTokens,
+                r.ActualPromptTokens,
+                r.ActualResponseTokens,
+                r.ElapsedMilliseconds,
+                r.StatusCode,
+                r.Success,
+                r.RawPromptTokens)).ToList(),
+            CalculateCostStatus(statistics.Last7Days, options.Value.Pricing),
+            includeOverhead
+                ? CalculateOverheadStatus(snapshot.RecentRequests, options.Value.TokenEstimationOverheadFactor, options.Value.TokenEstimator)
+                : null);
+    }
+
     public static MonitorCostStatus? CalculateCostStatus(
         IReadOnlyDictionary<RoutingTarget, ActivityStatisticsTotals> last7Days,
         PricingOptions? pricing)

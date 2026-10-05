@@ -62,6 +62,28 @@ public sealed class OllamaRouterOptions
     /// as a pretty-printed payload file. Disabled by default.
     /// </summary>
     public RecordingOptions? Recording { get; set; }
+
+    /// <summary>
+    /// Configuration for the in-terminal live activity monitor.
+    /// </summary>
+    public TerminalMonitoringOptions TerminalMonitoring { get; set; } = new();
+}
+
+/// <summary>
+/// Configuration for the in-terminal live activity monitor.
+/// </summary>
+public sealed class TerminalMonitoringOptions
+{
+    /// <summary>
+    /// Enables the in-terminal live activity monitor in the server console. Defaults to true.
+    /// When false or when standard output is redirected, the console falls back to plain logging.
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Refresh interval in seconds for the terminal UI. Defaults to 2.0 seconds.
+    /// </summary>
+    public double RefreshIntervalSeconds { get; set; } = 2.0;
 }
 
 /// <summary>

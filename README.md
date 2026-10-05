@@ -205,6 +205,8 @@ Configuration is provided through the `OllamaRouter` section of `appsettings.jso
 | `Pricing:CompletionPricePerMillion` | Optional price per 1,000,000 completion / output tokens. Used to calculate 7-day estimated savings and cloud overflow cost. Alias: `OutputPricePerMillion`. |
 | `Pricing:PricePerMillion` | Optional flat price per 1,000,000 tokens when prompt and completion rates are not differentiated. |
 | `Pricing:Currency` | Currency symbol or label to display in the monitoring UI (e.g. `$`, `€`, `USD`). Defaults to `$`. |
+| `TerminalMonitoring:Enabled` | Enables the in-terminal live activity monitor in the server console (zero VRAM consumption). Defaults to `true`. Can also be disabled via `--no-tui`. |
+| `TerminalMonitoring:RefreshIntervalSeconds` | Refresh interval in seconds for the in-terminal live monitor. Defaults to `2.0`. |
 
 ### Token estimation overhead recommendations
 
@@ -279,6 +281,26 @@ The page shows:
 The page auto-refreshes every 2 seconds by polling `/monitor/api`. A clickable link to this page is printed to the console when the router starts (see [Running](#running)).
 
 ![Monitor screenshot](docs/monitor.png)
+
+### In-terminal activity monitor (TUI)
+
+To monitor traffic without keeping a GPU-accelerated web browser running (which consumes valuable VRAM needed for local LLMs and gaming), OllamaRouter includes a built-in **Terminal UI** that runs directly in the server console.
+
+It displays the same live information as the monitoring page:
+- Instance states (**Local**, **Remote**, **Cloud**: Idle, Busy, Offline, Disabled);
+- Token statistics (**Today** and **Last 7 days**: requests, input tokens, output tokens, totals);
+- Target usage ratio breakdown progress bar and legend (last 7 days);
+- Estimated savings and cloud overflow costs (when `Pricing` is configured);
+- In-progress requests (target, model, estimated input tokens, elapsed time);
+- Recent completed requests with status highlighting.
+
+The terminal UI is completely read-only (actions and token estimation overhead recommendations are omitted) and keeps a direct link to open the full-featured web monitoring page whenever runtime configuration changes or deep model tuning are needed.
+
+It starts automatically when running interactively. If standard output is redirected (e.g. running as a background service or in CI), it automatically falls back to standard log output. You can also explicitly disable it by passing `--no-tui`:
+
+```powershell
+OllamaRouter.exe --no-tui
+```
 
 ## Requirements
 
