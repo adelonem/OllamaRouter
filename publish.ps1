@@ -1,0 +1,1 @@
+dotnet publish OllamaRouter/OllamaRouter.csproj -c Release -r win-x64 -o OllamaRouter-win-x64

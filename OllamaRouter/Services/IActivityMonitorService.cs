@@ -65,9 +65,9 @@ public interface IActivityMonitorService
     bool IsBusy(RoutingTarget target);
 
     /// <summary>
-    /// Returns the number of consecutive failed adjacent requests for the specified target and estimated token count,
-    /// scanning backwards from the most recent completed request until a request with a different token count
-    /// or a successful request is encountered.
+    /// Returns the number of consecutive failed adjacent requests for the specified target and estimated token count
+    /// (within the specified token tolerance margin), scanning backwards from the most recent completed request
+    /// until a request outside the token margin or a successful request is encountered.
     /// </summary>
-    int GetConsecutiveFailures(RoutingTarget target, int estimatedPromptTokens);
+    int GetConsecutiveFailures(RoutingTarget target, int estimatedPromptTokens, int tokenTolerance = 4000);
 }

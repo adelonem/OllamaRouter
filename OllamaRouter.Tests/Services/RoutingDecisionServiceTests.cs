@@ -20,7 +20,8 @@ public class RoutingDecisionServiceTests
         string? cloudModel = null,
         Mock<IModelCatalogCacheService>? modelCatalogCacheService = null,
         Mock<IActivityMonitorService>? activityMonitor = null,
-        TargetAvailabilitySnapshot? targets = null)
+        TargetAvailabilitySnapshot? targets = null,
+        int consecutiveFailuresTokenTolerance = 4000)
     {
         var options = Microsoft.Extensions.Options.Options.Create(new OllamaRouterOptions
         {
@@ -34,7 +35,8 @@ public class RoutingDecisionServiceTests
                 }
             },
             LocalUrl = "http://127.0.0.1:11435",
-            RemoteUrl = "http://aiserver.local:11434"
+            RemoteUrl = "http://aiserver.local:11434",
+            ConsecutiveFailuresTokenTolerance = consecutiveFailuresTokenTolerance
         });
 
         var targetAvailability = new Mock<ITargetAvailabilityService>();
@@ -728,6 +730,32 @@ public class RoutingDecisionServiceTests
         var decision = await sut.DecideAsync(tokenCount: 91_300, modelName: "Qwen3.8-27B:latest");
 
         Assert.Equal(RoutingTarget.Cloud, decision);
+    }
+
+    [Fact]
+    public async Task DecideAsync_WhenRemoteFails3Times_PassesConfiguredTokenTolerance()
+    {
+        var catalogClient = new Mock<IOllamaModelCatalogClient>();
+        var gpuVramProvider = new Mock<IGpuVramProvider>();
+        var activityMonitor = CreateActivityMonitorNotBusy();
+
+        activityMonitor
+            .Setup(a => a.GetConsecutiveFailures(RoutingTarget.Remote, 92_500, 5_000))
+            .Returns(3);
+
+        var sut = CreateSut(
+            catalogClient,
+            gpuVramProvider,
+            maxLocalTokens: 36_864,
+            modelName: "Qwen3.8-27B",
+            cloudModel: "glm-5.3-flash:cloud",
+            activityMonitor: activityMonitor,
+            consecutiveFailuresTokenTolerance: 5_000);
+
+        var decision = await sut.DecideAsync(tokenCount: 92_500, modelName: "Qwen3.8-27B:latest");
+
+        Assert.Equal(RoutingTarget.Cloud, decision);
+        activityMonitor.Verify(a => a.GetConsecutiveFailures(RoutingTarget.Remote, 92_500, 5_000), Times.AtLeastOnce);
     }
 
     [Fact]

@@ -62,7 +62,8 @@ public sealed class RoutingDecisionService : IRoutingDecisionService
         var maxFailures = settings.MaxConsecutiveFailures;
         if (maxFailures > 0 && _activityMonitor is not null)
         {
-            var consecutiveFailures = _activityMonitor.GetConsecutiveFailures(primaryTarget.Target, tokenCount);
+            var tokenTolerance = settings.ConsecutiveFailuresTokenTolerance;
+            var consecutiveFailures = _activityMonitor.GetConsecutiveFailures(primaryTarget.Target, tokenCount, tokenTolerance);
             if (consecutiveFailures >= maxFailures)
             {
                 var primaryIndex = _targets.IndexOf(primaryTarget);
@@ -70,20 +71,20 @@ public sealed class RoutingDecisionService : IRoutingDecisionService
                 {
                     var subsequentCandidates = _targets
                         .Skip(primaryIndex + 1)
-                        .Where(t => _activityMonitor.GetConsecutiveFailures(t.Target, tokenCount) < maxFailures);
+                        .Where(t => _activityMonitor.GetConsecutiveFailures(t.Target, tokenCount, tokenTolerance) < maxFailures);
 
                     var nextTarget = await TrySelectTargetAsync(context, subsequentCandidates, cancellationToken);
                     if (nextTarget is not null)
                     {
                         _logger.LogInformation(
-                            "{Model}: Target {FailedTarget} failed {Failures} times for adjacent request with {TokenCount} tokens. Switching to next target {NewTarget}.",
-                            normalizedName, primaryTarget.Target, consecutiveFailures, tokenCount, nextTarget.Target);
+                            "{Model}: Target {FailedTarget} failed {Failures} times for adjacent request with {TokenCount} tokens (tolerance {Tolerance}). Switching to next target {NewTarget}.",
+                            normalizedName, primaryTarget.Target, consecutiveFailures, tokenCount, tokenTolerance, nextTarget.Target);
                         return nextTarget.Target;
                     }
 
                     _logger.LogWarning(
-                        "{Model}: Target {FailedTarget} failed {Failures} times for adjacent request with {TokenCount} tokens, but no subsequent target is enabled or can process the request. Keeping {FailedTarget}.",
-                        normalizedName, primaryTarget.Target, consecutiveFailures, tokenCount, primaryTarget.Target);
+                        "{Model}: Target {FailedTarget} failed {Failures} times for adjacent request with {TokenCount} tokens (tolerance {Tolerance}), but no subsequent target is enabled or can process the request. Keeping {FailedTarget}.",
+                        normalizedName, primaryTarget.Target, consecutiveFailures, tokenCount, tokenTolerance, primaryTarget.Target);
                 }
             }
         }

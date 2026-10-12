@@ -82,18 +82,20 @@ When a model's configuration includes a `CloudModel` entry (e.g. `deepseek-v3.1:
 
 When errors or timeouts arise (such as HTTP 400 Bad Request because a prompt exceeds an instance's context size, or gateway timeouts), LLM clients typically retry the request repeatedly until success. If the chosen target cannot process the request, these retries can take an extremely long time.
 
-To alleviate this, OllamaRouter correlates requests using only their **estimated prompt token count** and tracks consecutive failures across **adjacent requests**:
+To alleviate this, OllamaRouter correlates requests using their **estimated prompt token count** and tracks consecutive failures across **adjacent requests**:
 
-- If adjacent requests with the same estimated token count fail **3 times** on the same target (configurable via `MaxConsecutiveFailures`, defaulting to `3`), the router dynamically skips that target and routes subsequent retries to the next target in the chain (**Local** → **Remote** → **Cloud**).
+- If adjacent requests within the token tolerance margin fail **3 times** on the same target (configurable via `MaxConsecutiveFailures`, defaulting to `3`), the router dynamically skips that target and routes subsequent retries to the next target in the chain (**Local** → **Remote** → **Cloud**).
 - For example, if a large 91.3k-token request fails 3 times on **Remote** (e.g. returning 400 errors or timing out):
   ```
   02:36:08   📡 Remote   Qwen3.8-27B:latest   91.3k / -   -   307.3s   400
   02:42:08   📡 Remote   Qwen3.8-27B:latest   91.3k / -   -   358.1s   400
   02:43:59   📡 Remote   Qwen3.8-27B:latest   91.3k / -   -   332.4s   400
   ```
-  The next 91.3k retry will be dispatched to **Cloud** if enabled. If Cloud is disabled or has no `CloudModel` configured, it keeps the Remote target as fallback.
+  The next retry will be dispatched to **Cloud** if enabled. If Cloud is disabled or has no `CloudModel` configured, it keeps the Remote target as fallback.
 - Similarly, if a request fails 3 times on **Local**, it fails over to **Remote**; if Remote also fails 3 times, it fails over to **Cloud**.
-- Adjacency is strict: any request with a different token count breaks adjacency and resets tracking, and any successful response (`HTTP status < 400`) clears the failure count.
+- **Tolerance margin**: Because AI agents frequently append conversation turns, retry notes, or error context on retries (causing prompt token size to slightly increase on each attempt), adjacency allows a configurable margin of tolerance via `ConsecutiveFailuresTokenTolerance` (defaulting to `4000` tokens). Requests that increase or vary within this margin remain part of the same failure streak. Set to `0` to require an exact token count.
+- **Interrupted request detection**: When an OpenAI-compatible caller aborts or times out mid-stream (e.g. client-side timeout during large prompt evaluation), the response may have already committed HTTP 200 headers. OllamaRouter inspects client disconnects (`RequestAborted`), YARP forwarder errors, and stream completion sentinels (`data: [DONE]` for SSE, `"done": true` for NDJSON). Interrupted streams are automatically detected, marked as failures (`HTTP 499` Client Closed Request or `HTTP 502`), and counted toward consecutive failures so cloud overflow can unstuck the agent.
+- Any fully completed successful response (`HTTP status < 400`) clears the failure count.
 
 ### Other endpoints
 
@@ -197,7 +199,8 @@ Configuration is provided through the `OllamaRouter` section of `appsettings.jso
 | `BindAddress`      | Address the router itself listens on. Defaults to `http://localhost:11434`. Set it to e.g. `http://0.0.0.0:11434` to accept connections from other machines. |
 | `TokenEstimator`   | Token estimation strategy: `"Heuristic"` (default, fast, zero heap memory overhead, saves ~24 MB RAM by omitting the BPE dictionary) or `"Tiktoken"` (uses Microsoft.ML.Tokenizers `cl100k_base`). |
 | `TokenEstimationOverheadFactor` | Multiplicative correction applied to the estimated token count, to compensate for the systematic underestimation of the generic tokenizer versus the actual tokenizer and chat template of targeted models. Defaults to `1.0` (no correction); see [recommendations below](#token-estimation-overhead-recommendations). |
-| `MaxConsecutiveFailures` | Number of consecutive failures on a target for adjacent requests with the same estimated token count before switching to the next target in the chain (`Local` → `Remote` → `Cloud`). Defaults to `3`. Set to `0` to disable automatic target switching. |
+| `MaxConsecutiveFailures` | Number of consecutive failures on a target for adjacent requests within `ConsecutiveFailuresTokenTolerance` before switching to the next target in the chain (`Local` → `Remote` → `Cloud`). Defaults to `3`. Set to `0` to disable automatic target switching. |
+| `ConsecutiveFailuresTokenTolerance` | Maximum difference in estimated prompt tokens between adjacent requests to consider them part of the same retry streak. Defaults to `4000`. Set to `0` to require an exact match. |
 | `Recording:Enabled` | Enables the optional [inference request recording](#inference-request-recording-optional), saving each request's metadata and full request body for investigation of estimated vs actual token counts. Defaults to `false`. |
 | `Recording:OutputDirectory` | Directory where the records are stored: a `requests.jsonl` manifest plus one pretty-printed payload file per request. Defaults to the `inference-requests` folder in the local application data folder (`%LOCALAPPDATA%\OllamaRouter\inference-requests` on Windows). |
 | `Recording:MaxFiles` | Maximum number of payload files to keep in the output directory; the oldest records are deleted once this count is exceeded (and the manifest is trimmed to match). Defaults to `500`. Set to `0` to keep all files. |

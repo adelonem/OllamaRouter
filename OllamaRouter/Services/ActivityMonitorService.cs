@@ -52,16 +52,17 @@ public sealed class ActivityMonitorService : IActivityMonitorService
         return _inProgress.Values.Any(r => r.Target == target);
     }
 
-    public int GetConsecutiveFailures(RoutingTarget target, int estimatedPromptTokens)
+    public int GetConsecutiveFailures(RoutingTarget target, int estimatedPromptTokens, int tokenTolerance = 4000)
     {
         var entries = _history.ToArray();
         int count = 0;
+        int currentTokenCount = estimatedPromptTokens;
 
         for (int i = entries.Length - 1; i >= 0; i--)
         {
             var entry = entries[i];
 
-            if (entry.EstimatedPromptTokens != estimatedPromptTokens || entry.Success)
+            if (entry.Success || Math.Abs(entry.EstimatedPromptTokens - currentTokenCount) > tokenTolerance)
             {
                 break;
             }
@@ -70,6 +71,8 @@ public sealed class ActivityMonitorService : IActivityMonitorService
             {
                 count++;
             }
+
+            currentTokenCount = entry.EstimatedPromptTokens;
         }
 
         return count;

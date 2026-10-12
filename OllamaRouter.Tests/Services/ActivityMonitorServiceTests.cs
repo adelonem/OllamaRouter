@@ -234,4 +234,61 @@ public class ActivityMonitorServiceTests
         Assert.Equal(1, sut.GetConsecutiveFailures(RoutingTarget.Cloud, tokenCount));
         Assert.Equal(0, sut.GetConsecutiveFailures(RoutingTarget.Local, tokenCount));
     }
+
+    [Fact]
+    public void GetConsecutiveFailures_SuccessiveRequestsIncreaseWithinTokenTolerance_CountsFailures()
+    {
+        var sut = new ActivityMonitorService();
+
+        // 1st request failed with 90,000 tokens
+        var req1 = sut.StartRequest(RoutingTarget.Remote, "Qwen3.8-27B:latest", 90_000);
+        sut.CompleteRequest(req1, new ActivityLogEntry(
+            DateTimeOffset.UtcNow, RoutingTarget.Remote, "Qwen3.8-27B:latest", 90_000, null, null, 30_000, 499, false));
+
+        // 2nd request (retry) increased by 1,200 tokens (91,200) and failed
+        var req2 = sut.StartRequest(RoutingTarget.Remote, "Qwen3.8-27B:latest", 91_200);
+        sut.CompleteRequest(req2, new ActivityLogEntry(
+            DateTimeOffset.UtcNow, RoutingTarget.Remote, "Qwen3.8-27B:latest", 91_200, null, null, 30_000, 499, false));
+
+        // 3rd request (retry) increased by another 1,500 tokens (92,700) and failed
+        var req3 = sut.StartRequest(RoutingTarget.Remote, "Qwen3.8-27B:latest", 92_700);
+        sut.CompleteRequest(req3, new ActivityLogEntry(
+            DateTimeOffset.UtcNow, RoutingTarget.Remote, "Qwen3.8-27B:latest", 92_700, null, null, 30_000, 499, false));
+
+        // When evaluating the next retry with 93,500 tokens:
+        // Each successive hop was <= 4,000 tokens apart, so all 3 failures are counted
+        var count = sut.GetConsecutiveFailures(RoutingTarget.Remote, 93_500, tokenTolerance: 4_000);
+
+        Assert.Equal(3, count);
+    }
+
+    [Fact]
+    public void GetConsecutiveFailures_SuccessiveRequestsIncreaseBeyondTokenTolerance_ReturnsZero()
+    {
+        var sut = new ActivityMonitorService();
+
+        var req1 = sut.StartRequest(RoutingTarget.Remote, "Qwen3.8-27B:latest", 90_000);
+        sut.CompleteRequest(req1, new ActivityLogEntry(
+            DateTimeOffset.UtcNow, RoutingTarget.Remote, "Qwen3.8-27B:latest", 90_000, null, null, 30_000, 499, false));
+
+        // Next request is 95,000 tokens (delta = 5,000 > 4,000)
+        var count = sut.GetConsecutiveFailures(RoutingTarget.Remote, 95_000, tokenTolerance: 4_000);
+
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void GetConsecutiveFailures_WithZeroTokenTolerance_RequiresExactCount()
+    {
+        var sut = new ActivityMonitorService();
+
+        var req1 = sut.StartRequest(RoutingTarget.Remote, "Qwen3.8-27B:latest", 90_000);
+        sut.CompleteRequest(req1, new ActivityLogEntry(
+            DateTimeOffset.UtcNow, RoutingTarget.Remote, "Qwen3.8-27B:latest", 90_000, null, null, 30_000, 499, false));
+
+        // 100 tokens difference with tolerance = 0 should NOT match
+        Assert.Equal(0, sut.GetConsecutiveFailures(RoutingTarget.Remote, 90_100, tokenTolerance: 0));
+        // Exact match should count
+        Assert.Equal(1, sut.GetConsecutiveFailures(RoutingTarget.Remote, 90_000, tokenTolerance: 0));
+    }
 }

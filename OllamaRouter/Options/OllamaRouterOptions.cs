@@ -50,10 +50,18 @@ public sealed class OllamaRouterOptions
     public PricingOptions? Pricing { get; set; }
 
     /// <summary>
-    /// Number of consecutive failures on a target for adjacent requests with the same estimated token count
-    /// before switching to the next target. Defaults to 3. Set to 0 to disable automatic target switching.
+    /// Number of consecutive failures on a target for adjacent requests within
+    /// <see cref="ConsecutiveFailuresTokenTolerance"/> before switching to the next target.
+    /// Defaults to 3. Set to 0 to disable automatic target switching.
     /// </summary>
     public int MaxConsecutiveFailures { get; set; } = 3;
+
+    /// <summary>
+    /// Allowed difference in estimated prompt tokens between adjacent requests
+    /// to consider them part of the same retry streak. Defaults to 4000.
+    /// Set to 0 to require an exact match.
+    /// </summary>
+    public int ConsecutiveFailuresTokenTolerance { get; set; } = 4000;
 
     /// <summary>
     /// Optional recording mode, to investigate the difference between the estimated token count

@@ -5,6 +5,7 @@ using Moq;
 using OllamaRouter.Middleware;
 using OllamaRouter.Options;
 using OllamaRouter.Services;
+using Yarp.ReverseProxy.Forwarder;
 using MsOptions = Microsoft.Extensions.Options.Options;
 
 namespace OllamaRouter.Tests.Middleware;
@@ -397,6 +398,261 @@ public class OllamaRoutingMiddlewareTests
             m => m.CompleteRequest(
                 requestId,
                 It.Is<ActivityLogEntry>(e => e.ActualPromptTokens == 19553 && e.ActualResponseTokens == 26)),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_InterruptedOpenAiSseResponse_MarksSuccessFalseAndRecordsStatus502()
+    {
+        var context = BuildContext("/v1/chat/completions", """{ "model": "qwen", "stream": true }""");
+        var responseBody = new MemoryStream();
+        context.Response.Body = responseBody;
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        tokenEstimator.Setup(t => t.EstimateTokens(It.IsAny<IReadOnlyList<string>>())).Returns(100);
+
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Remote);
+
+        var requestId = Guid.NewGuid();
+        var activityMonitor = new Mock<IActivityMonitorService>();
+        activityMonitor.Setup(m => m.StartRequest(It.IsAny<RoutingTarget>(), "qwen", It.IsAny<int>())).Returns(requestId);
+
+        // SSE response started and returned status 200, but was cut off before sending [DONE]
+        const string incompleteSseResponse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n";
+
+        RequestDelegate next = c =>
+        {
+            c.Response.StatusCode = 200;
+            c.Response.ContentType = "text/event-stream";
+            c.Response.WriteAsync(incompleteSseResponse);
+            return Task.CompletedTask;
+        };
+
+        var sut = CreateSut(next, tokenEstimator, routingDecisionService, activityMonitor: activityMonitor);
+
+        await sut.InvokeAsync(context);
+
+        activityMonitor.Verify(
+            m => m.CompleteRequest(
+                requestId,
+                It.Is<ActivityLogEntry>(e => e.Success == false && e.StatusCode == 502)),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_ClientAbortedRequest_MarksSuccessFalseAndRecordsStatus499()
+    {
+        var context = BuildContext("/v1/chat/completions", """{ "model": "qwen", "stream": true }""");
+        var responseBody = new MemoryStream();
+        context.Response.Body = responseBody;
+
+        var cts = new CancellationTokenSource();
+        // Hook context.RequestAborted
+        var defaultHttpContext = (DefaultHttpContext)context;
+        defaultHttpContext.RequestAborted = cts.Token;
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        tokenEstimator.Setup(t => t.EstimateTokens(It.IsAny<IReadOnlyList<string>>())).Returns(100);
+
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Remote);
+
+        var requestId = Guid.NewGuid();
+        var activityMonitor = new Mock<IActivityMonitorService>();
+        activityMonitor.Setup(m => m.StartRequest(It.IsAny<RoutingTarget>(), "qwen", It.IsAny<int>())).Returns(requestId);
+
+        RequestDelegate next = c =>
+        {
+            c.Response.StatusCode = 200;
+            c.Response.ContentType = "text/event-stream";
+            // Client disconnects mid-stream
+            cts.Cancel();
+            throw new OperationCanceledException(cts.Token);
+        };
+
+        var sut = CreateSut(next, tokenEstimator, routingDecisionService, activityMonitor: activityMonitor);
+
+        await sut.InvokeAsync(context);
+
+        activityMonitor.Verify(
+            m => m.CompleteRequest(
+                requestId,
+                It.Is<ActivityLogEntry>(e => e.Success == false && e.StatusCode == 499)),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_YarpForwarderError_ClientCanceled_MarksSuccessFalseAndRecordsStatus499()
+    {
+        var context = BuildContext("/v1/chat/completions", """{ "model": "qwen", "stream": true }""");
+        var responseBody = new MemoryStream();
+        context.Response.Body = responseBody;
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        tokenEstimator.Setup(t => t.EstimateTokens(It.IsAny<IReadOnlyList<string>>())).Returns(100);
+
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Remote);
+
+        var requestId = Guid.NewGuid();
+        var activityMonitor = new Mock<IActivityMonitorService>();
+        activityMonitor.Setup(m => m.StartRequest(It.IsAny<RoutingTarget>(), "qwen", It.IsAny<int>())).Returns(requestId);
+
+        var forwarderErrorFeatureMock = new Mock<IForwarderErrorFeature>();
+        forwarderErrorFeatureMock.SetupGet(f => f.Error).Returns(ForwarderError.ResponseBodyClient);
+
+        RequestDelegate next = c =>
+        {
+            c.Response.StatusCode = 200;
+            c.Response.ContentType = "text/event-stream";
+            c.Features.Set<IForwarderErrorFeature>(forwarderErrorFeatureMock.Object);
+            return Task.CompletedTask;
+        };
+
+        var sut = CreateSut(next, tokenEstimator, routingDecisionService, activityMonitor: activityMonitor);
+
+        await sut.InvokeAsync(context);
+
+        activityMonitor.Verify(
+            m => m.CompleteRequest(
+                requestId,
+                It.Is<ActivityLogEntry>(e => e.Success == false && e.StatusCode == 499)),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_InterruptedNdjsonResponse_MarksSuccessFalseAndRecordsStatus502()
+    {
+        var context = BuildContext("/api/chat", """{ "model": "qwen", "stream": true }""");
+        var responseBody = new MemoryStream();
+        context.Response.Body = responseBody;
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        tokenEstimator.Setup(t => t.EstimateTokens(It.IsAny<IReadOnlyList<string>>())).Returns(100);
+
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Remote);
+
+        var requestId = Guid.NewGuid();
+        var activityMonitor = new Mock<IActivityMonitorService>();
+        activityMonitor.Setup(m => m.StartRequest(It.IsAny<RoutingTarget>(), "qwen", It.IsAny<int>())).Returns(requestId);
+
+        // Stream cut off with done: false, no done: true
+        const string ndjsonResponse =
+            """{"model":"Qwen","message":{"content":"Hi"},"done":false}""" + "\n";
+
+        RequestDelegate next = c =>
+        {
+            c.Response.StatusCode = 200;
+            c.Response.ContentType = "application/x-ndjson";
+            c.Response.WriteAsync(ndjsonResponse);
+            return Task.CompletedTask;
+        };
+
+        var sut = CreateSut(next, tokenEstimator, routingDecisionService, activityMonitor: activityMonitor);
+
+        await sut.InvokeAsync(context);
+
+        activityMonitor.Verify(
+            m => m.CompleteRequest(
+                requestId,
+                It.Is<ActivityLogEntry>(e => e.Success == false && e.StatusCode == 502)),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_CompletedSseResponse_WithClientDisconnectAfterward_MarksSuccessTrueAndRecordsStatus200()
+    {
+        var context = BuildContext("/v1/chat/completions", """{ "model": "qwen", "stream": true }""");
+        var responseBody = new MemoryStream();
+        context.Response.Body = responseBody;
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        tokenEstimator.Setup(t => t.EstimateTokens(It.IsAny<IReadOnlyList<string>>())).Returns(100);
+
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Remote);
+
+        var requestId = Guid.NewGuid();
+        var activityMonitor = new Mock<IActivityMonitorService>();
+        activityMonitor.Setup(m => m.StartRequest(It.IsAny<RoutingTarget>(), "qwen", It.IsAny<int>())).Returns(requestId);
+
+        var forwarderErrorFeatureMock = new Mock<IForwarderErrorFeature>();
+        forwarderErrorFeatureMock.SetupGet(f => f.Error).Returns(ForwarderError.ResponseBodyClient);
+
+        RequestDelegate next = async c =>
+        {
+            c.Response.StatusCode = 200;
+            c.Response.ContentType = "text/event-stream";
+            await c.Response.WriteAsync("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":108500,\"completion_tokens\":416}}\n\ndata: [DONE]\n\n");
+            // Client disconnects at or right after EOF
+            c.Features.Set<IForwarderErrorFeature>(forwarderErrorFeatureMock.Object);
+        };
+
+        var sut = CreateSut(next, tokenEstimator, routingDecisionService, activityMonitor: activityMonitor);
+
+        await sut.InvokeAsync(context);
+
+        activityMonitor.Verify(
+            m => m.CompleteRequest(
+                requestId,
+                It.Is<ActivityLogEntry>(e => e.Success == true && e.StatusCode == 200 && e.ActualResponseTokens == 416)),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_CompletedNdjsonResponse_WithClientDisconnectAfterward_MarksSuccessTrueAndRecordsStatus200()
+    {
+        var context = BuildContext("/api/chat", """{ "model": "qwen", "stream": true }""");
+        var responseBody = new MemoryStream();
+        context.Response.Body = responseBody;
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        tokenEstimator.Setup(t => t.EstimateTokens(It.IsAny<IReadOnlyList<string>>())).Returns(100);
+
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Remote);
+
+        var requestId = Guid.NewGuid();
+        var activityMonitor = new Mock<IActivityMonitorService>();
+        activityMonitor.Setup(m => m.StartRequest(It.IsAny<RoutingTarget>(), "qwen", It.IsAny<int>())).Returns(requestId);
+
+        var forwarderErrorFeatureMock = new Mock<IForwarderErrorFeature>();
+        forwarderErrorFeatureMock.SetupGet(f => f.Error).Returns(ForwarderError.ResponseBodyClient);
+
+        const string ndjsonResponse =
+            """{"model":"Qwen","message":{"content":"Hi"},"done":false}""" + "\n" +
+            """{"model":"Qwen","done":true,"prompt_eval_count":100,"eval_count":50}""" + "\n";
+
+        RequestDelegate next = async c =>
+        {
+            c.Response.StatusCode = 200;
+            c.Response.ContentType = "application/x-ndjson";
+            await c.Response.WriteAsync(ndjsonResponse);
+            c.Features.Set<IForwarderErrorFeature>(forwarderErrorFeatureMock.Object);
+        };
+
+        var sut = CreateSut(next, tokenEstimator, routingDecisionService, activityMonitor: activityMonitor);
+
+        await sut.InvokeAsync(context);
+
+        activityMonitor.Verify(
+            m => m.CompleteRequest(
+                requestId,
+                It.Is<ActivityLogEntry>(e => e.Success == true && e.StatusCode == 200 && e.ActualResponseTokens == 50)),
             Times.Once);
     }
 }

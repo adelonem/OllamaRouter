@@ -7,6 +7,7 @@ using OllamaRouter.Parsing;
 using OllamaRouter.ReverseProxy;
 using OllamaRouter.Serialization;
 using OllamaRouter.Services;
+using Yarp.ReverseProxy.Forwarder;
 
 namespace OllamaRouter.Middleware;
 
@@ -142,18 +143,44 @@ public sealed class OllamaRoutingMiddleware(
         var requestId = activityMonitor.StartRequest(target, modelName, tokenCount);
         var stopwatch = Stopwatch.StartNew();
         var success = false;
+        var isClientAborted = false;
 
         try
         {
             await next(context);
-            success = context.Response.StatusCode < 400;
+        }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            isClientAborted = true;
         }
         finally
         {
             stopwatch.Stop();
             context.Response.Body = originalBody;
 
+            isClientAborted = isClientAborted || context.RequestAborted.IsCancellationRequested;
+
+            var forwarderError = context.Features.Get<IForwarderErrorFeature>();
+            if (forwarderError is not null && forwarderError.Error is ForwarderError.RequestCanceled
+                                                                   or ForwarderError.ResponseBodyCanceled
+                                                                   or ForwarderError.ResponseBodyClient
+                                                                   or ForwarderError.RequestBodyCanceled
+                                                                   or ForwarderError.RequestBodyClient)
+            {
+                isClientAborted = true;
+            }
+
             var (actualPromptTokens, actualResponseTokens) = TryExtractActualTokens(capturingStream.CapturedTail);
+            var isStreamCompleted = IsResponseComplete(context, capturingStream.CapturedTail, actualResponseTokens);
+
+            var isInterrupted = !isStreamCompleted;
+            success = context.Response.StatusCode < 400 && !isInterrupted;
+
+            var recordedStatusCode = context.Response.StatusCode;
+            if (context.Response.StatusCode < 400 && isInterrupted)
+            {
+                recordedStatusCode = isClientAborted ? 499 : StatusCodes.Status502BadGateway;
+            }
 
             var entry = new ActivityLogEntry(
                 DateTimeOffset.UtcNow,
@@ -163,7 +190,7 @@ public sealed class OllamaRoutingMiddleware(
                 actualPromptTokens,
                 actualResponseTokens,
                 stopwatch.ElapsedMilliseconds,
-                context.Response.StatusCode,
+                recordedStatusCode,
                 success,
                 rawTokenCount);
 
@@ -171,6 +198,41 @@ public sealed class OllamaRoutingMiddleware(
             activityStatistics.Add(entry);
             inferenceRequestRecorder.Record(entry, endpoint, body);
         }
+    }
+
+    private static bool IsResponseComplete(HttpContext context, string capturedTail, int? actualResponseTokens)
+    {
+        if (actualResponseTokens is not null)
+        {
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(capturedTail))
+        {
+            return false;
+        }
+
+        var contentType = context.Response.ContentType ?? "";
+
+        bool isSse = contentType.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase)
+            || capturedTail.Contains("data:", StringComparison.Ordinal);
+
+        if (isSse)
+        {
+            return capturedTail.Contains("[DONE]", StringComparison.Ordinal);
+        }
+
+        bool isNdjson = contentType.Contains("application/x-ndjson", StringComparison.OrdinalIgnoreCase)
+            || capturedTail.Contains("\"done\":false", StringComparison.Ordinal)
+            || capturedTail.Contains("\"done\": false", StringComparison.Ordinal);
+
+        if (isNdjson)
+        {
+            return capturedTail.Contains("\"done\":true", StringComparison.Ordinal) ||
+                   capturedTail.Contains("\"done\": true", StringComparison.Ordinal);
+        }
+
+        return capturedTail.TrimEnd().EndsWith('}');
     }
 
     private static (int? PromptTokens, int? ResponseTokens) TryExtractActualTokens(string capturedTail)
