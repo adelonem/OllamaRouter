@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -654,5 +655,190 @@ public class OllamaRoutingMiddlewareTests
                 requestId,
                 It.Is<ActivityLogEntry>(e => e.Success == true && e.StatusCode == 200 && e.ActualResponseTokens == 50)),
             Times.Once);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_CompletionRequest_EmitsTransparencyHeaders()
+    {
+        var context = BuildContext("/api/chat", """{ "model": "qwen2.5-coder:32b", "prompt": "Hello" }""");
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        tokenEstimator.Setup(t => t.EstimateTokens(It.IsAny<IReadOnlyList<string>>())).Returns(1420);
+
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(1420, "qwen2.5-coder:32b", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Local);
+
+        var sut = CreateSut(_ => Task.CompletedTask, tokenEstimator, routingDecisionService);
+
+        await sut.InvokeAsync(context);
+
+        Assert.Equal("Local", context.Response.Headers["X-OllamaRouter-Target"]);
+        Assert.Equal("qwen2.5-coder:32b", context.Response.Headers["X-OllamaRouter-Model"]);
+        Assert.Equal("1420", context.Response.Headers["X-OllamaRouter-Estimated-Tokens"]);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_TargetPinningHeader_WhenEnabled_PinsTargetWithoutDecideAsync()
+    {
+        var context = BuildContext("/api/chat", """{ "model": "llama3", "prompt": "Hello" }""");
+        context.Request.Headers["X-OllamaRouter-Target"] = "Cloud";
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        tokenEstimator.Setup(t => t.EstimateTokens(It.IsAny<IReadOnlyList<string>>())).Returns(50);
+
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        var targetAvailability = new Mock<ITargetAvailabilityService>();
+        targetAvailability.Setup(t => t.IsEnabled(RoutingTarget.Cloud)).Returns(true);
+
+        var sut = CreateSut(_ => Task.CompletedTask, tokenEstimator, routingDecisionService, targetAvailability: targetAvailability);
+
+        await sut.InvokeAsync(context);
+
+        Assert.Equal("Cloud", context.Response.Headers["X-OllamaRouter-Target"]);
+        // When pinned and enabled, DecideAsync must not be called
+        routingDecisionService.Verify(r => r.DecideAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_TargetPinningHeader_WhenDisabled_FallsBackToDecideAsync()
+    {
+        var context = BuildContext("/api/chat", """{ "model": "llama3", "prompt": "Hello" }""");
+        context.Request.Headers["X-OllamaRouter-Target"] = "Remote";
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        tokenEstimator.Setup(t => t.EstimateTokens(It.IsAny<IReadOnlyList<string>>())).Returns(50);
+
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(50, "llama3", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Local);
+
+        var targetAvailability = new Mock<ITargetAvailabilityService>();
+        targetAvailability.Setup(t => t.IsEnabled(RoutingTarget.Remote)).Returns(false);
+        targetAvailability.Setup(t => t.IsEnabled(RoutingTarget.Local)).Returns(true);
+
+        var sut = CreateSut(_ => Task.CompletedTask, tokenEstimator, routingDecisionService, targetAvailability: targetAvailability);
+
+        await sut.InvokeAsync(context);
+
+        Assert.Equal("Local", context.Response.Headers["X-OllamaRouter-Target"]);
+        // Because Remote was disabled, it fell back to dynamic routing
+        routingDecisionService.Verify(r => r.DecideAsync(50, "llama3", It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_AutoHealToolCalls_HealsResponseInBodyStream()
+    {
+        var context = BuildContext("/v1/chat/completions", """{ "model": "qwen" }""");
+        var responseBody = new MemoryStream();
+        context.Response.Body = responseBody;
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Local);
+
+        const string rawOpenAiResponse = """
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "id": "",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "```json\n{\"path\":\"src/main.cs\"}\n```"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        """;
+
+        RequestDelegate next = async c =>
+        {
+            c.Response.StatusCode = 200;
+            c.Response.ContentType = "application/json";
+            await c.Response.WriteAsync(rawOpenAiResponse);
+        };
+
+        var sut = CreateSut(next, tokenEstimator, routingDecisionService);
+
+        await sut.InvokeAsync(context);
+
+        responseBody.Position = 0;
+        var resultJson = Encoding.UTF8.GetString(responseBody.ToArray());
+
+        Assert.DoesNotContain("```json", resultJson);
+
+        var doc = JsonNode.Parse(resultJson);
+        var call = doc?["choices"]?[0]?["message"]?["tool_calls"]?[0];
+        Assert.NotNull(call);
+        Assert.StartsWith("call_", call["id"]?.GetValue<string>());
+        Assert.Equal("{\"path\":\"src/main.cs\"}", call["function"]?["arguments"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task InvokeAsync_AutoHealToolCalls_WhenHeaderFalse_BypassesHealing()
+    {
+        var context = BuildContext("/v1/chat/completions", """{ "model": "qwen" }""");
+        context.Request.Headers["X-OllamaRouter-AutoHeal-Tools"] = "false";
+        var responseBody = new MemoryStream();
+        context.Response.Body = responseBody;
+
+        var tokenEstimator = new Mock<ITokenEstimator>();
+        var routingDecisionService = new Mock<IRoutingDecisionService>();
+        routingDecisionService
+            .Setup(r => r.DecideAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(RoutingTarget.Local);
+
+        const string rawOpenAiResponse = """
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "id": "",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "```json\n{\"path\":\"src/main.cs\"}\n```"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        """;
+
+        RequestDelegate next = async c =>
+        {
+            c.Response.StatusCode = 200;
+            c.Response.ContentType = "application/json";
+            await c.Response.WriteAsync(rawOpenAiResponse);
+        };
+
+        var sut = CreateSut(next, tokenEstimator, routingDecisionService);
+
+        await sut.InvokeAsync(context);
+
+        responseBody.Position = 0;
+        var resultJson = Encoding.UTF8.GetString(responseBody.ToArray());
+
+        // Since auto-healing was bypassed via header, ```json remains present
+        Assert.Contains("```json", resultJson);
     }
 }

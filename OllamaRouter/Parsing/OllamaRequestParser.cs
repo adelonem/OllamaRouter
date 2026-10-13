@@ -130,6 +130,11 @@ public static class OllamaRequestParser
                 }
             }
 
+            if (root.TryGetProperty("format", out var formatElement) && formatElement.ValueKind == JsonValueKind.Object)
+            {
+                parts.Add(formatElement.GetRawText());
+            }
+
             return new OllamaCompletionRequestInfo(modelName, parts, priorContextTokenCount);
         }
         catch

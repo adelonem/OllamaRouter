@@ -17,6 +17,34 @@ public static class OllamaEndpointsExtensions
         {
             var mergedModels = await catalogClient.GetMergedTagsAsync(options.Value.LocalUrl, options.Value.RemoteUrl);
 
+            if (options.Value.Models != null)
+            {
+                foreach (var (_, modelOpts) in options.Value.Models)
+                {
+                    if (!string.IsNullOrWhiteSpace(modelOpts.CloudModel))
+                    {
+                        var cloudName = modelOpts.CloudModel;
+                        if (!mergedModels.Any(m => string.Equals(m?["name"]?.GetValue<string>(), cloudName, StringComparison.OrdinalIgnoreCase) ||
+                                                   string.Equals(m?["model"]?.GetValue<string>(), cloudName, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            mergedModels.Add((JsonNode)new JsonObject
+                            {
+                                ["name"] = cloudName,
+                                ["model"] = cloudName,
+                                ["modified_at"] = DateTime.UtcNow.ToString("o"),
+                                ["size"] = 0,
+                                ["details"] = new JsonObject
+                                {
+                                    ["family"] = "cloud",
+                                    ["parameter_size"] = "cloud",
+                                    ["quantization_level"] = "cloud"
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+
             var response = new JsonObject
             {
                 ["models"] = mergedModels
@@ -40,6 +68,27 @@ public static class OllamaEndpointsExtensions
         app.MapGet("/v1/models", async (IOllamaModelCatalogClient catalogClient, IOptions<OllamaRouterOptions> options) =>
         {
             var mergedModels = await catalogClient.GetMergedOpenAIModelsAsync(options.Value.LocalUrl, options.Value.RemoteUrl);
+
+            if (options.Value.Models != null)
+            {
+                foreach (var (_, modelOpts) in options.Value.Models)
+                {
+                    if (!string.IsNullOrWhiteSpace(modelOpts.CloudModel))
+                    {
+                        var cloudName = modelOpts.CloudModel;
+                        if (!mergedModels.Any(m => string.Equals(m?["id"]?.GetValue<string>(), cloudName, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            mergedModels.Add((JsonNode)new JsonObject
+                            {
+                                ["id"] = cloudName,
+                                ["object"] = "model",
+                                ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                                ["owned_by"] = "cloud"
+                            });
+                        }
+                    }
+                }
+            }
 
             var response = new JsonObject
             {

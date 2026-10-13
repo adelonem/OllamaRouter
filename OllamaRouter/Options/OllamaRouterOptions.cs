@@ -75,6 +75,12 @@ public sealed class OllamaRouterOptions
     /// Configuration for the in-terminal live activity monitor.
     /// </summary>
     public TerminalMonitoringOptions TerminalMonitoring { get; set; } = new();
+
+    /// <summary>
+    /// Protocol-level sanitization of tool calling responses (stripping markdown fences from arguments,
+    /// generating missing tool call IDs, promoting pseudo-tool calls from content). Defaults to true.
+    /// </summary>
+    public bool AutoHealToolCalls { get; set; } = true;
 }
 
 /// <summary>

@@ -11,6 +11,8 @@ OllamaRouter is more than a simple two-tier proxy, it also provides:
 
 - **Cloud overflow** (optional, per model). When both instances are busy, requests can **overflow to [ollama.com cloud](https://ollama.com)** models, so a slow/unavailable Local or Remote instance never fully blocks incoming requests. See [Cloud overflow](#cloud-overflow).
 - **Target failover on consecutive errors**. When client retries repeatedly fail on a target (e.g. context limit HTTP 400 or timeouts), requests automatically switch to the next target in the chain. See [Target failover on consecutive errors](#target-failover-on-consecutive-errors).
+- **Routing transparency & client target pinning**. Emits telemetry headers (`X-OllamaRouter-Target`, `X-OllamaRouter-Model`, `X-OllamaRouter-Estimated-Tokens`) on all completions, and allows clients to explicitly override routing via an incoming `X-OllamaRouter-Target` header. See [Routing transparency & target pinning](#routing-transparency--client-target-pinning).
+- **Protocol-level tool call auto-healing**. Intercepts and repairs tool calls from local open-weights models (stripping markdown fences in arguments, promoting `<tool_call>` pseudo-tags from content, generating missing IDs, fixing syntax) so agent SDKs never crash on deserialization. See [Tool call auto-healing](#protocol-level-tool-call-auto-healing).
 - **A built-in monitoring page**. A lightweight, dependency-free page at `/monitor` shows which targets are busy, which requests are in progress and what has been processed recently, and lets you enable/disable the **Local**, **Remote** and **Cloud** targets at runtime — switching the router between operating modes without restarting it. See [Monitoring](#monitoring).
 
 ## How it works
@@ -97,11 +99,60 @@ To alleviate this, OllamaRouter correlates requests using their **estimated prom
 - **Interrupted request detection**: When an OpenAI-compatible caller aborts or times out mid-stream (e.g. client-side timeout during large prompt evaluation), the response may have already committed HTTP 200 headers. OllamaRouter inspects client disconnects (`RequestAborted`), YARP forwarder errors, and stream completion sentinels (`data: [DONE]` for SSE, `"done": true` for NDJSON). Interrupted streams are automatically detected, marked as failures (`HTTP 499` Client Closed Request or `HTTP 502`), and counted toward consecutive failures so cloud overflow can unstuck the agent.
 - Any fully completed successful response (`HTTP status < 400`) clears the failure count.
 
+### Routing transparency & client target pinning
+
+AI agent frameworks, orchestrators (such as [NightCodeForge](https://github.com/jetelain/NightCodeForge), OpenCode, Aider, Zed AI), and telemetry pipelines benefit from knowing which physical backend processed each inference request, or being able to force a specific destination when necessary:
+
+1. **Routing transparency headers:** OllamaRouter emits headers on all chat and completion responses (`/api/chat`, `/api/generate`, `/v1/chat/completions`, `/v1/completions`):
+   - `X-OllamaRouter-Target`: The physical routing destination (`Local`, `Remote`, or `Cloud`).
+   - `X-OllamaRouter-Model`: The model name extracted from the request.
+   - `X-OllamaRouter-Estimated-Tokens`: The estimated prompt tokens used for routing decisions.
+
+   Headers are registered via `OnStarting` so they stream immediately on chunked NDJSON and SSE connections:
+   ```http
+   HTTP/1.1 200 OK
+   Content-Type: application/x-ndjson
+   X-OllamaRouter-Target: Local
+   X-OllamaRouter-Model: qwen2.5-coder:32b
+   X-OllamaRouter-Estimated-Tokens: 1420
+   ```
+
+2. **Client target pinning (inbound header):** Clients can explicitly pin or prefer a target by supplying the `X-OllamaRouter-Target` request header:
+   ```http
+   POST /v1/chat/completions HTTP/1.1
+   Host: localhost:11434
+   X-OllamaRouter-Target: Cloud
+   Content-Type: application/json
+   ```
+   - **Zero-VRAM Cloud Diagnostics:** Force execution to `Cloud` so large failure transcripts or debug analysis consume zero local VRAM and bypass the local dev queue.
+   - **Air-Gapped / Untrusted Triage:** Force execution to `Local` to guarantee no external network transmission for untrusted or sensitive code.
+   - **JIT Model Preload:** Force `Local` on empty `POST /api/generate` requests to ensure weights are resident in GPU memory.
+
+   If the requested target is enabled in `targetAvailability`, OllamaRouter honors the pin immediately. If the requested target is currently disabled, it logs a warning and falls back to dynamic routing.
+
+### Protocol-level tool call auto-healing
+
+Local open-weights models (such as `qwen2.5-coder`, `deepseek-r1`, `llama3.1`, or fine-tunes) frequently exhibit subtle tool calling format inconsistencies that crash strict agent SDKs (OpenAI SDK, Semantic Kernel, Microsoft Agent Framework). OllamaRouter sits directly in the HTTP stream between the client and Ollama/vLLM backends, transparently healing tool call responses on the wire before deserialization:
+
+- **Markdown fence stripping inside `function.arguments`:** Strips accidental markdown code fences (` ```json\n{...}\n``` `) from `arguments` so client JSON deserializers parse the payload directly without throwing syntax exceptions.
+- **Pseudo-tool-call promotion:** When models emit `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` (or `Action: ...\nAction Input: ...`) inside `content` while leaving structured `tool_calls` empty, OllamaRouter extracts the tool calls, populates the structured `tool_calls` array, and strips the pseudo-tags from `content`.
+- **Missing tool call ID generation:** Generates a compliant `call_xxxxxxxx` identifier if the model or backend leaves the tool call `id` empty or null.
+- **JSON syntax repair:** Automatically strips invalid trailing commas (`,\s*}` / `,\s*]`) and escapes unescaped control characters in JSON argument string values.
+
+This operates across non-streaming JSON, streaming NDJSON (`application/x-ndjson`), and streaming SSE (`text/event-stream`).
+
+**Control & Bypass:**
+- Enabled by default via `"AutoHealToolCalls": true` in `appsettings.json`.
+- Can be bypassed per-request (e.g. for raw model benchmarking or eval harnesses) by passing:
+  `X-OllamaRouter-AutoHeal-Tools: false`.
+
 ### Other endpoints
 
 - All other requests (model pull/push/delete, etc.) are routed to **Local** by default.
-- `GET /api/tags` and `GET /v1/models` return a **merged** list of models available on both instances (local models take priority in case of a name conflict).
+- `GET /api/tags` and `GET /v1/models` return a **merged** list of models available on both instances (local models take priority in case of a name conflict), including configured `CloudModel` overflow options so client model pickers auto-discover cloud models.
 - `GET /api/ps` returns a **merged** list of models currently loaded/running on both instances.
+- `POST /api/models/unload` unloads running models from the local instance without disabling the `Local` routing target.
+- `POST /monitor/reclaim-vram` unloads running models and accepts an optional query parameter `disableTarget` (defaults to `true` to disable Local for gaming/editing, or pass `?disableTarget=false` for non-destructive unloading).
 - Any other request is proxied as a catch-all to the instance selected by the routing decision.
 
 ## Setup Ollama instances
@@ -210,6 +261,7 @@ Configuration is provided through the `OllamaRouter` section of `appsettings.jso
 | `Pricing:Currency` | Currency symbol or label to display in the monitoring UI (e.g. `$`, `€`, `USD`). Defaults to `$`. |
 | `TerminalMonitoring:Enabled` | Enables the in-terminal live activity monitor in the server console (zero VRAM consumption). Defaults to `true`. Can also be disabled via `--no-tui`. |
 | `TerminalMonitoring:RefreshIntervalSeconds` | Refresh interval in seconds for the in-terminal live monitor. Defaults to `2.0`. |
+| `AutoHealToolCalls` | Enables protocol-level sanitization of tool calling responses (strips markdown fences from arguments, generates missing IDs, promotes pseudo `<tool_call>` tags from content, and repairs syntax). Defaults to `true`. Can be bypassed per request via `X-OllamaRouter-AutoHeal-Tools: false`. |
 
 ### Token estimation overhead recommendations
 
@@ -307,13 +359,15 @@ OllamaRouter.exe --no-tui
 
 ## Requirements
 
-- .NET 8 SDK
+- .NET 9 / .NET 10 SDK
 - Two reachable Ollama instances (local and remote)
 - `nvidia-smi` available on the local machine to report free VRAM (returns 0 if not available, which effectively disables local routing based on VRAM)
 
 ## Project structure
 
-- `Middleware/OllamaRoutingMiddleware.cs` – inspects intercepted requests and sets the `X-Ollama-Target` header used by YARP for routing.
+- `Middleware/OllamaRoutingMiddleware.cs` – inspects intercepted requests, emits routing telemetry headers, enforces target pinning, and sets the `X-Ollama-Target` header used by YARP for routing.
+- `Transforms/ToolCallHealingTransform.cs` – protocol-level sanitization of tool calling payloads (strips markdown fences, generates missing IDs, promotes pseudo `<tool_call>` tags from content, and repairs syntax).
+- `Transforms/ToolCallHealingResponseStream.cs` – intercepts SSE, NDJSON, and buffered JSON responses to apply tool call healing transparently on the wire.
 - `Services/RoutingDecisionService.cs` – orchestrates the chain of target handlers to make the routing decision (first available capable target, with queued fallback when busy).
 - `Services/IRoutingTargetHandler.cs` – abstraction for routing destinations (`Local`, `Remote`, `Cloud`) defining availability, overflow status, and request capability.
 - `Services/LocalRoutingTargetHandler.cs` – target handler for the local Ollama instance (model configuration, token limits, loaded models, GPU VRAM).
@@ -321,10 +375,10 @@ OllamaRouter.exe --no-tui
 - `Services/CloudRoutingTargetHandler.cs` – overflow target handler relaying to ollama.com cloud models when primary instances are busy.
 - `Services/RoutingContext.cs` – encapsulates request parameters, token estimates, thresholds, and shared catalog checks for a routing decision.
 - `Services/OllamaModelCatalogClient.cs` – fetches and merges model catalogs (`/api/tags`, `/v1/models`, `/api/ps`) from both instances.
-- `Parsing/OllamaRequestParser.cs` – extracts the prompt and model name from request bodies.
+- `Parsing/OllamaRequestParser.cs` – extracts the prompt, model name, and JSON Schema format from request bodies.
 - `ReverseProxy/OllamaReverseProxyConfig.cs` – builds the YARP routes/clusters in code.
-- `Endpoints/OllamaEndpointsExtensions.cs` – hybrid endpoints (`/api/tags`, `/api/ps`, `/v1/models`) that short-circuit YARP to return merged results.
-- `Endpoints/MonitorEndpointsExtensions.cs` – lightweight monitoring UI (`/monitor`, `/monitor/api`) and target toggles (`POST /targets`).
+- `Endpoints/OllamaEndpointsExtensions.cs` – hybrid endpoints (`/api/tags`, `/api/ps`, `/v1/models`) that short-circuit YARP to return merged results including configured cloud models.
+- `Endpoints/MonitorEndpointsExtensions.cs` – lightweight monitoring UI (`/monitor`, `/monitor/api`), target toggles (`POST /targets`), and non-destructive VRAM reclaim (`POST /api/models/unload`, `POST /monitor/reclaim-vram`).
 - `Services/ActivityMonitorService.cs` – in-memory bookkeeping of busy state, in-progress requests and recent request history used by the monitoring UI.
 - `Services/ActivityStatisticsService.cs` – per-target counters (requests, actual input/output tokens) with current-day and last-7-days aggregation, persisted on a best-effort basis to a dedicated JSON file in the application data folder (`%LOCALAPPDATA%\OllamaRouter\activity-statistics.json` on Windows) and exposed via `/monitor/api`.
 - `Services/TargetAvailabilityService.cs` – in-memory state of the Local/Remote/Cloud enable/disable flags, loaded at startup from and persisted on a best-effort basis to a dedicated JSON state file in the application data folder (`%LOCALAPPDATA%\OllamaRouter\targets.json` on Windows), toggled via `POST /targets`.

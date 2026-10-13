@@ -364,6 +364,34 @@ public class OllamaRequestParserTests
     }
 
     [Fact]
+    public void ParseCompletionRequest_FormatObject_IsIncludedInContextParts()
+    {
+        var body = """
+        {
+            "model": "qwen3.8-27b",
+            "messages": [
+                { "role": "user", "content": "Generate a user." }
+            ],
+            "format": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "age": { "type": "integer" }
+                },
+                "required": ["name"]
+            }
+        }
+        """;
+
+        var result = OllamaRequestParser.ParseCompletionRequest(body);
+
+        Assert.Equal(2, result.ContextParts.Count);
+        Assert.Equal("Generate a user.", result.ContextParts[0]);
+        Assert.Contains("\"type\": \"object\"", result.ContextParts[1]);
+        Assert.Contains("\"properties\"", result.ContextParts[1]);
+    }
+
+    [Fact]
     public void ParseCompletionRequest_InvalidJson_ReturnsEmptyInfo()
     {
         var result = OllamaRequestParser.ParseCompletionRequest("invalid-json");

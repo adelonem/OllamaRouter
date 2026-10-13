@@ -7,6 +7,7 @@ using OllamaRouter.Parsing;
 using OllamaRouter.ReverseProxy;
 using OllamaRouter.Serialization;
 using OllamaRouter.Services;
+using OllamaRouter.Transforms;
 using Yarp.ReverseProxy.Forwarder;
 
 namespace OllamaRouter.Middleware;
@@ -82,7 +83,24 @@ public sealed class OllamaRoutingMiddleware(
                 + requestInfo.PriorContextTokenCount;
             tokenCount = (int)Math.Ceiling(rawTokenCount * options.Value.TokenEstimationOverheadFactor);
 
-            target = await routingDecisionService.DecideAsync(tokenCount, modelName, context.RequestAborted);
+            if (context.Request.Headers.TryGetValue("X-OllamaRouter-Target", out var requestedTargetHeader) &&
+                Enum.TryParse<RoutingTarget>(requestedTargetHeader.ToString(), ignoreCase: true, out var requestedTarget))
+            {
+                if (targetAvailability.IsEnabled(requestedTarget))
+                {
+                    target = requestedTarget;
+                    logger.LogInformation("Routing target explicitly pinned via request header: {Target}", target);
+                }
+                else
+                {
+                    logger.LogWarning("Requested target {Target} is disabled. Falling back to dynamic routing.", requestedTarget);
+                    target = await routingDecisionService.DecideAsync(tokenCount, modelName, context.RequestAborted);
+                }
+            }
+            else
+            {
+                target = await routingDecisionService.DecideAsync(tokenCount, modelName, context.RequestAborted);
+            }
 
             logger.LogInformation("{ModelName} - Tokens: {TokenCount} => {Target}", modelName, tokenCount, target);
         }
@@ -122,6 +140,18 @@ public sealed class OllamaRoutingMiddleware(
             _ => OllamaReverseProxyConfig.RemoteTarget
         };
 
+        context.Response.Headers["X-OllamaRouter-Target"] = target.ToString();
+        context.Response.Headers["X-OllamaRouter-Model"] = modelName;
+        context.Response.Headers["X-OllamaRouter-Estimated-Tokens"] = tokenCount.ToString();
+
+        context.Response.OnStarting(() =>
+        {
+            context.Response.Headers["X-OllamaRouter-Target"] = target.ToString();
+            context.Response.Headers["X-OllamaRouter-Model"] = modelName;
+            context.Response.Headers["X-OllamaRouter-Estimated-Tokens"] = tokenCount.ToString();
+            return Task.CompletedTask;
+        });
+
         if (target == RoutingTarget.Cloud)
         {
             var normalizedName = RoutingDecisionService.NormalizeModelName(modelName);
@@ -136,9 +166,17 @@ public sealed class OllamaRoutingMiddleware(
             }
         }
 
+        var autoHeal = options.Value.AutoHealToolCalls;
+        if (context.Request.Headers.TryGetValue("X-OllamaRouter-AutoHeal-Tools", out var autoHealHeader) &&
+            bool.TryParse(autoHealHeader.ToString(), out var requestedAutoHeal))
+        {
+            autoHeal = requestedAutoHeal;
+        }
+
         var originalBody = context.Response.Body;
         var capturingStream = new ResponseCapturingStream(originalBody);
-        context.Response.Body = capturingStream;
+        var healingStream = new ToolCallHealingResponseStream(capturingStream, context, autoHeal, logger);
+        context.Response.Body = healingStream;
 
         var requestId = activityMonitor.StartRequest(target, modelName, tokenCount);
         var stopwatch = Stopwatch.StartNew();
@@ -148,6 +186,7 @@ public sealed class OllamaRoutingMiddleware(
         try
         {
             await next(context);
+            await healingStream.FinishAsync();
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {

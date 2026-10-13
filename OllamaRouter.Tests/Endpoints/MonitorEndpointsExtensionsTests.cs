@@ -190,6 +190,72 @@ public class MonitorEndpointsExtensionsTests
     }
 
     [Fact]
+    public async Task PostReclaimVram_WhenDisableTargetFalse_UnloadsModels_AndLeavesLocalTargetEnabled()
+    {
+        var (app, client, mocks) = await CreateTestAppAsync("http://127.0.0.1:11435");
+        try
+        {
+            mocks.TargetAvailability.Setup(t => t.GetSnapshot())
+                .Returns(new TargetAvailabilitySnapshot(true, true, false));
+
+            mocks.CatalogClient.Setup(c => c.StopRunningModelsAsync("http://127.0.0.1:11435", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(["llama3.2:latest"]);
+
+            var response = await client.PostAsync("/monitor/reclaim-vram?disableTarget=false", null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var json = await response.Content.ReadFromJsonAsync<JsonObject>();
+
+            Assert.NotNull(json);
+            Assert.True(json["success"]?.GetValue<bool>());
+            Assert.False(json["localDisabled"]?.GetValue<bool>());
+            Assert.Equal(1, json["count"]?.GetValue<int>());
+
+            // Target availability must NOT have been updated
+            mocks.TargetAvailability.Verify(t => t.Update(It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<bool>()), Times.Never);
+            mocks.CatalogClient.Verify(c => c.StopRunningModelsAsync("http://127.0.0.1:11435", It.IsAny<CancellationToken>()), Times.Once);
+        }
+        finally
+        {
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task PostModelsUnload_DefaultLeavesLocalTargetEnabled_AndUnloadsRunningModels()
+    {
+        var (app, client, mocks) = await CreateTestAppAsync("http://127.0.0.1:11435");
+        try
+        {
+            mocks.TargetAvailability.Setup(t => t.GetSnapshot())
+                .Returns(new TargetAvailabilitySnapshot(true, true, false));
+
+            mocks.CatalogClient.Setup(c => c.StopRunningModelsAsync("http://127.0.0.1:11435", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(["qwen3:8b"]);
+
+            var response = await client.PostAsync("/api/models/unload", null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var json = await response.Content.ReadFromJsonAsync<JsonObject>();
+
+            Assert.NotNull(json);
+            Assert.True(json["success"]?.GetValue<bool>());
+            Assert.False(json["localDisabled"]?.GetValue<bool>());
+            Assert.Equal(1, json["count"]?.GetValue<int>());
+
+            // Local must NOT have been disabled
+            mocks.TargetAvailability.Verify(t => t.Update(It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<bool>()), Times.Never);
+            mocks.CatalogClient.Verify(c => c.StopRunningModelsAsync("http://127.0.0.1:11435", It.IsAny<CancellationToken>()), Times.Once);
+        }
+        finally
+        {
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task PostReclaimVram_WhenNoLocalUrlConfigured_StillDisablesLocalTarget()
     {
         var (app, client, mocks) = await CreateTestAppAsync(localUrl: "");

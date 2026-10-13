@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using OllamaRouter.Options;
 using OllamaRouter.Serialization;
@@ -43,10 +44,20 @@ public static class MonitorEndpointsExtensions
             return Results.Ok(new TargetsUpdateResponse(request.Local, request.Remote, request.Cloud));
         });
 
-        app.MapPost("/monitor/reclaim-vram", async (IOllamaModelCatalogClient catalogClient, ITargetAvailabilityService targetAvailability, IOptions<OllamaRouterOptions> options, CancellationToken cancellationToken) =>
+        app.MapPost("/monitor/reclaim-vram", async (
+            [FromQuery] bool? disableTarget,
+            IOllamaModelCatalogClient catalogClient,
+            ITargetAvailabilityService targetAvailability,
+            IOptions<OllamaRouterOptions> options,
+            CancellationToken cancellationToken) =>
         {
-            var targets = targetAvailability.GetSnapshot();
-            targetAvailability.Update(local: false, targets.Remote, targets.Cloud);
+            var shouldDisable = disableTarget ?? true;
+
+            if (shouldDisable)
+            {
+                var targets = targetAvailability.GetSnapshot();
+                targetAvailability.Update(local: false, targets.Remote, targets.Cloud);
+            }
 
             var localUrl = options.Value.LocalUrl?.TrimEnd('/');
             if (string.IsNullOrWhiteSpace(localUrl))
@@ -56,7 +67,7 @@ public static class MonitorEndpointsExtensions
                     Message: "Local URL is not configured.",
                     Count: 0,
                     UnloadedModels: Array.Empty<string>(),
-                    LocalDisabled: true));
+                    LocalDisabled: shouldDisable));
             }
 
             var unloaded = await catalogClient.StopRunningModelsAsync(localUrl, cancellationToken);
@@ -65,7 +76,42 @@ public static class MonitorEndpointsExtensions
                 Message: null,
                 Count: unloaded.Count,
                 UnloadedModels: unloaded,
-                LocalDisabled: true));
+                LocalDisabled: shouldDisable));
+        });
+
+        app.MapPost("/api/models/unload", async (
+            [FromQuery] bool? disableTarget,
+            IOllamaModelCatalogClient catalogClient,
+            ITargetAvailabilityService targetAvailability,
+            IOptions<OllamaRouterOptions> options,
+            CancellationToken cancellationToken) =>
+        {
+            var shouldDisable = disableTarget ?? false;
+
+            if (shouldDisable)
+            {
+                var targets = targetAvailability.GetSnapshot();
+                targetAvailability.Update(local: false, targets.Remote, targets.Cloud);
+            }
+
+            var localUrl = options.Value.LocalUrl?.TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(localUrl))
+            {
+                return Results.Ok(new ReclaimVramResponse(
+                    Success: false,
+                    Message: "Local URL is not configured.",
+                    Count: 0,
+                    UnloadedModels: Array.Empty<string>(),
+                    LocalDisabled: shouldDisable));
+            }
+
+            var unloaded = await catalogClient.StopRunningModelsAsync(localUrl, cancellationToken);
+            return Results.Ok(new ReclaimVramResponse(
+                Success: true,
+                Message: null,
+                Count: unloaded.Count,
+                UnloadedModels: unloaded,
+                LocalDisabled: shouldDisable));
         });
 
         app.MapGet("/monitor", () => Results.Content(MonitorPageHtml, "text/html"));
