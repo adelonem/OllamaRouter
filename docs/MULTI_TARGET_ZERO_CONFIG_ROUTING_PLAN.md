@@ -30,7 +30,7 @@ flowchart TD
         cloud["☁️ Cloud Overflow (glm-5.3-flash:cloud)<br/>• Last resort fallback"]
     end
 
-    router -->|"Prompt ≤ 48k & fits VRAM"| desktop
+    router -->|"Prompt ≤ 48k and fits VRAM"| desktop
     router -->|"Developer MoE / Small LLMs"| laptop
     router -->|"Context > 48k or heavy batch"| server1
     router -.->|"Pool expansion"| server2
@@ -62,9 +62,9 @@ Targets are declared in `appsettings.json` with a friendly name, endpoint URL, a
 ```json
 "OllamaRouter": {
   "Targets": [
-    { "Name": "desktop", "Url": "http://127.0.0.1:11435", "HardwareHint": "16gb" },
-    { "Name": "laptop",  "Url": "http://192.168.1.50:11435", "HardwareHint": "8gb" },
-    { "Name": "server1", "Url": "http://192.168.1.25:11434", "HardwareHint": "96gb" }
+    { "Name": "desktop", "Url": "http://127.0.0.1:11435", "HardwareHint": "16gb", "MaxParallel": 1 },
+    { "Name": "laptop",  "Url": "http://192.168.1.50:11435", "HardwareHint": "8gb", "MaxParallel": 1 },
+    { "Name": "server1", "Url": "http://192.168.1.25:11434", "HardwareHint": "96gb", "MaxParallel": 1 }
   ],
   "CloudOverflow": {
     "Enabled": true,
@@ -74,9 +74,21 @@ Targets are declared in `appsettings.json` with a friendly name, endpoint URL, a
 }
 ```
 
-*Note: If `Targets` is missing, OllamaRouter falls back to legacy `LocalUrl` / `RemoteUrl` configuration for seamless backward compatibility. `HardwareHint` string values (`"8gb"`, `"16gb"`, `"96gb"`) normalize internally to effective `MaxVramMB` values (e.g. 8192, 16384, 98304).*
+*Note: If `Targets` is missing, OllamaRouter falls back to legacy `LocalUrl` / `RemoteUrl` configuration for seamless backward compatibility.*
 
-*Configuration Migration Note: In legacy OllamaRouter, `OllamaRouter:Models` acted as a mandatory allowlist gate—unconfigured models were barred from running locally. In this zero-config fleet architecture, `Models` transitions to an **optional overrides dictionary** (e.g. for custom context ceilings, cloud model mapping, or custom `MinRequiredVramMB`). If a model is omitted from `Models`, the router dynamically discovers its capabilities via `/api/tags` and `POST /api/show` and routes it without manual configuration.*
+`HardwareHint` is a convenience preset that normalizes to an effective `MaxVramMB` value:
+
+| `HardwareHint` | Effective `MaxVramMB` | Default `MaxParallel` |
+| :--- | :--- | :--- |
+| `"8gb"` | 8,192 | 1 |
+| `"16gb"` | 16,384 | 1 |
+| `"96gb"` | 98,304 | 1 |
+
+An explicit `MaxVramMB` (or `MaxParallel`) in the target entry always **overrides** the preset — when both are present, the explicit value wins for all capacity and suitability checks, so the two are not independent knobs. `MaxParallel` is the per-target `TargetMaxParallel` value used by the ConcurrencyPenalty in §2.2 (single-GPU targets stay at 1).
+
+*Configuration Migration Note: In legacy OllamaRouter, `OllamaRouter:Models` acted as a mandatory allowlist gate—unconfigured models were barred from running locally. In this zero-config fleet architecture, `Models` transitions to an **optional overrides dictionary** (e.g. for custom context ceilings, cloud model mapping, custom `MinRequiredVramMB`, or an explicit `Architecture: "Dense"|"Moe"` pin). If a model is omitted from `Models`, the router dynamically discovers its capabilities via `/api/tags` and `POST /api/show` and routes it without manual configuration.*
+
+*Behavioral Break Warning: The legacy per-model knobs `MaxLocalTokens` and `MinRequiredVramMB` are superseded by the derived ceilings and hardware suitability rules above. A manually tuned value (e.g. `MaxLocalTokens: 36864` for a 27B model) is silently replaced by the new derived ceiling (32k baseline bucket, 48k elastic max on 16 GB) once the model's capabilities are discovered dynamically. Existing `appsettings.json` files must be reviewed during migration; legacy keys are read with a deprecation warning for one transition release and then removed.*
 
 #### 2. Model Inspection & Zero-Config Parameter Discovery
 On catalog synchronization or first model touch, the router queries `POST /api/show` on each target and caches the parsed capabilities (invalidated when `/api/tags` digest changes):
@@ -98,7 +110,7 @@ On catalog synchronization or first model touch, the router queries `POST /api/s
 - **Model Sizing & Architecture Classification:**
   - **Model Weight Size:** Directly read from `size` (bytes on disk) in `GET /api/tags`.
   - **Parameter Count:** Read from `model_info["general.parameter_count"]` (exact integer) with fallback to regex parsing of `details.parameter_size` (e.g. `"27.8B"` $\rightarrow 27.8 \times 10^9$).
-  - **MoE (Mixture of Experts):** Identified by `model_info` containing `*.expert_count > 0` (e.g. `qwen35moe.expert_count`) or `details.family` containing `moe`. Because active parameter count is small ($\sim 3.2\text{B}$ for 35B A3B), MoE models are **capable on all targets** (including 8 GB Laptop).
+  - **MoE (Mixture of Experts):** Identified by `model_info` containing `*.expert_count > 0` (e.g. `qwen35moe.expert_count`), with fallback to `details.family` containing `moe`, with a final fallback to **permissive** (treated as MoE) when both signals are missing (e.g. older Ollama versions not yet exposing `model_info`). The permissive fallback deliberately avoids a *false Dense* classification that would wrongly veto a 35B-A3B model on the 8 GB Laptop; the residual risk (an unknown true Dense $\ge 14\text{B}$ model being routed to the small target) is mitigated by the operator pinning `Architecture: "Dense"` for that model in the optional `Models` overrides dictionary. Because active parameter count is small ($\sim 3.2\text{B}$ for 35B A3B), MoE models are **capable on all targets** (including 8 GB Laptop).
   - **Dense Models ($\ge 14\text{B}$):** Evaluated from `general.parameter_count >= 14_000_000_000`.
 
 - **Hardware Suitability Rules (Hard Filter):**
@@ -131,7 +143,7 @@ $$\text{Score} = \text{AffinityBonus}(+100) + \text{HardwareBonus}(+20) - \text{
 | **AffinityBonus** | **+100** | Target currently has the requested model actively loaded in memory (verified via `/api/ps`). Eliminates load latency. |
 | **HardwareBonus** | **+20** | Role-matching and anti-eviction offloading bonus:<br/>• Architect dense $\le 48\text{k} \rightarrow$ Desktop bonus.<br/>• Long context prompts $> 48\text{k} \rightarrow$ Server bonus.<br/>• MoE developer / Small Dense ($< 14\text{B}$) $\rightarrow$ Laptop offload bonus *when Desktop is holding a dense model hot or is busy*, protecting Desktop VRAM for Architect. When Desktop is idle and no dense model is hot, MoE requests run on Desktop at full 118 t/s. |
 | **EvictionPenalty** | **-80** | Target has a *different* model loaded in memory that would be evicted by loading this model (e.g. loading MoE on Desktop when Desktop has 27B loaded incurs $-80$, ensuring Laptop [score 0 or +100] wins without penalizing standalone MoE). |
-| **ConcurrencyPenalty** | **-40 per req<br/>+ Single-GPU Cliff (-100)** | Calibrated to eliminate single-GPU queueing:<br/>$$\text{ConcurrencyPenalty} = (\text{InFlightCount} \times 40) + (\text{InFlightCount} \ge \text{TargetMaxParallel} \mathbin{?} 100 : 0)$$<br/>*(On Desktop with $\text{MaxParallel} = 1$: 1 active request incurs $-140$. Score drops from $+120$ to $-20$. An idle Server [score 0] immediately wins the 2nd concurrent request, preventing queueing).* |
+| **ConcurrencyPenalty** | **-40 per req<br/>+ Single-GPU Cliff (-100)** | $\text{TargetMaxParallel}$ is the target's `MaxParallel` configuration value (default 1; see §2.1). Calibrated to eliminate single-GPU queueing:<br/>$$\text{ConcurrencyPenalty} = (\text{InFlightCount} \times 40) + (\text{InFlightCount} \ge \text{TargetMaxParallel} \mathbin{?} 100 : 0)$$<br/>*(On Desktop with $\text{MaxParallel} = 1$: 1 active request incurs $-140$. Score drops from $+120$ to $-20$. An idle Server [score 0] immediately wins the 2nd concurrent request, preventing queueing).* |
 
 *Tie-Breaker Rule*: If scores are equal, selection follows the declaration order in `appsettings.json` Targets list.
 
@@ -152,14 +164,14 @@ For **MoE models** (such as `Qwen3.6-35B-A3B-Code:latest`):
 
 ```mermaid
 flowchart TD
-    req["Incoming Request<br/>Estimated Tokens: $T$"] --> check{"$T + \text{Margin}$ vs $C_{\text{default}}$"}
-    check -->|"$\le 180\text{k}$ (Normal)"| normal{"Was Target<br/>Expanded?"}
+    req["Incoming Request<br/>Estimated Tokens: T"] --> check{"T + Margin vs C_default"}
+    check -->|"≤ 180k (Normal)"| normal{"Was Target<br/>Expanded?"}
     normal -->|"No"| pass["Pass default context<br/>(No reallocation needed)"]
     normal -->|"Yes"| hyst{"Cooldown Expired OR<br/>Tokens < 50% baseline?"}
     hyst -->|"Yes"| shrink["<b>Auto-Shrink Turn</b><br/>Inject <code>options.num_ctx = 184,320</code><br/><i>Ollama frees KV cache memory</i>"]
     hyst -->|"No (Active Lease)"| keep["<b>Preserve KV Cache</b><br/>Keep current expanded bucket<br/><i>Retains prompt prefix caching</i>"]
-    check -->|"$> 180\text{k}$ & $\le 256\text{k}$"| expand["<b>Elastic Expansion Turn</b><br/>Quantize to Next Bucket (e.g. 216k, 256k)<br/>Inject <code>options.num_ctx = \text{Bucket}</code><br/>Reset Cooldown Timer"]
-    check -->|"$> 256\text{k}$"| spill["Exceeds Hardware Max<br/>Route to AI Server or Cloud Overflow"]
+    check -->|"> 180k and ≤ 256k"| expand["<b>Elastic Expansion Turn</b><br/>Quantize to Next Bucket (e.g. 216k, 256k)<br/>Inject <code>options.num_ctx = Bucket</code><br/>Reset Cooldown Timer"]
+    check -->|"> 256k"| spill["Exceeds Hardware Max<br/>Route to AI Server or Cloud Overflow"]
 ```
 
 #### 2. Quantized Context Buckets
@@ -274,7 +286,7 @@ Both Desktop and Laptop can run OllamaRouter on the standard Ollama port (`11434
 
 ### 2.6 Header Architecture & Pinning
 
-To prevent header collisions and avoid security spoofing, OllamaRouter strictly differentiates internal YARP dispatch headers from public client headers:
+To prevent header collisions and avoid security spoofing, OllamaRouter strictly differentiates internal YARP dispatch headers from public client headers. Note the near-identical names: `X-OllamaRouter-Target` (**public**, contains the "Router" infix) is the client-facing pinning/telemetry header, while `X-Ollama-Target` (**internal only**, no "Router") is the existing YARP cluster selector header and is never honored from inbound clients:
 
 | Header Name | Direction | Purpose | Handling |
 | :--- | :--- | :--- | :--- |
@@ -368,7 +380,7 @@ gantt
 
 ### Phase 1: Multi-Target Fleet Foundation & Liveness Prober
 
-**Goal:** Transform OllamaRouter from hardcoded `Local` + `Remote` targets to an arbitrary list of named targets, backed by fast liveness probing and circuit breaking, while preserving full compatibility across existing unit tests.
+**Goal:** Transform OllamaRouter from hardcoded `Local` + `Remote` targets to an arbitrary list of named targets, backed by fast liveness probing and circuit breaking, while preserving *behavioral* compatibility for existing local/remote configurations (a bounded, explicitly enumerated API break is accepted; see the breaking surface list below).
 
 #### Deliverables & Implementation:
 1. **Target Options Schema (`OllamaTargetOptions`):**
@@ -378,11 +390,12 @@ gantt
        public string Name { get; set; } = string.Empty;
        public string Url { get; set; } = string.Empty;
        public string? HardwareHint { get; set; } // "8gb", "16gb", "96gb"
-       public int? MaxVramMB { get; set; }
+       public int? MaxVramMB { get; set; }        // overrides HardwareHint when set
+       public int MaxParallel { get; set; } = 1;  // TargetMaxParallel for ConcurrencyPenalty
        public bool Enabled { get; set; } = true;
    }
    ```
-2. **Backwards-Compatible `RoutingTarget` Value Object (Zero Test Breakage):**
+2. **Backwards-Compatible `RoutingTarget` Value Object (Minimal Source Breakage):**
    Rather than introducing a new type name (`TargetId`) that would force renaming across ~250 unit tests and service interfaces, convert `public enum RoutingTarget` directly into an extensible `readonly record struct`:
    ```csharp
    public readonly record struct RoutingTarget(string Value)
@@ -396,10 +409,16 @@ gantt
        public override string ToString() => Value;
    }
    ```
-   *Why this ensures zero test breakage:*
+   *Why this minimizes source breakage:*
    - Existing expressions like `RoutingTarget.Local`, `target == RoutingTarget.Local`, and `IsEnabled(RoutingTarget.Local)` continue to compile and pass unchanged.
    - Pattern matching and dictionary keys (`Dictionary<RoutingTarget, bool>`) work out of the box.
    - Enables arbitrary target strings (`new RoutingTarget("laptop")`, `new RoutingTarget("desktop")`, `new RoutingTarget("server1")`) seamlessly.
+   - Any *exhaustive* `switch` expression on the old enum (no default arm) becomes non-exhaustive for the struct and must gain a wildcard arm — a mechanical, compiler-guided fix.
+
+   *Known breaking API surface (N-target refactor, beyond the enum→struct change):*
+   - `TargetAvailabilityService.Update(bool local, bool remote, bool cloud)` and `TargetAvailabilitySnapshot(local, remote, cloud)` are inherently three-slot and must become `RoutingTarget`-keyed dictionaries (`Dictionary<RoutingTarget, bool>`) for arbitrary target lists.
+   - `ActivityStatisticsService` pre-populates fixed `[RoutingTarget.Local]` / `[RoutingTarget.Remote]` / `[RoutingTarget.Cloud]` entries per day; these become data-driven from the configured target list (with `Cloud` always present).
+   - `MonitorEndpointsExtensions` hardcodes `RoutingTarget.Local` / `.Remote` / `.Cloud` for the statistics display (busy flags, today / 7-day totals); refactor to iterate the configured targets.
 3. **Dynamic YARP Configuration (`OllamaReverseProxyConfig`):**
    - Dynamically generate a YARP cluster and route for each configured target name.
    - Configure internal header routing via `X-Ollama-Target`.
@@ -410,6 +429,7 @@ gantt
    - Background periodic timer (10s) to re-probe offline targets.
 5. **Availability State Store (`TargetAvailabilityService`):**
    - Update `targets.json` to persist `{ [targetName]: bool }`.
+   - Replace the fixed three-bool `Update` / `GetSnapshot` API with `RoutingTarget`-keyed dictionaries so any number of configured targets can be toggled at runtime.
    - Provide runtime toggle APIs for terminal and web monitors.
 
 #### Test Deliverables:
@@ -545,7 +565,7 @@ gantt
 
 1. Review and validate this updated specification against current workspace tests.
 2. Proceed with **Phase 1** implementation:
-   - Implement `OllamaTargetOptions` and `RoutingTarget` record struct (guaranteeing zero test breakage).
+   - Implement `OllamaTargetOptions` and `RoutingTarget` record struct, plus the enumerated N-target API refactor of `TargetAvailabilityService` / `ActivityStatisticsService` / monitor endpoints.
    - Refactor YARP cluster generation to support dynamic target lists.
    - Build `TargetLivenessService` with circuit breaker and background re-prober.
    - Write comprehensive unit tests for dynamic cluster routing, liveness transitions, and backward compatibility.
