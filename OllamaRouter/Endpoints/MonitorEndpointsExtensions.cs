@@ -804,7 +804,7 @@ public sealed record TargetsUpdateResponse(
 
 public sealed record ReclaimVramResponse(
     [property: JsonPropertyName("success")] bool Success,
-    [property: JsonPropertyName("message")] [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Message,
+    [property: JsonPropertyName("message")][property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Message,
     [property: JsonPropertyName("count")] int Count,
     [property: JsonPropertyName("unloadedModels")] IReadOnlyList<string> UnloadedModels,
     [property: JsonPropertyName("localDisabled")] bool LocalDisabled);
@@ -822,8 +822,8 @@ public sealed record MonitorStateResponse(
     [property: JsonPropertyName("statistics")] MonitorStatisticsStatus Statistics,
     [property: JsonPropertyName("inProgress")] IReadOnlyList<MonitorInProgressItem> InProgress,
     [property: JsonPropertyName("requests")] IReadOnlyList<MonitorRecentRequestItem> Requests,
-    [property: JsonPropertyName("cost")] [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] MonitorCostStatus? Cost = null,
-    [property: JsonPropertyName("overhead")] [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] MonitorOverheadStatus? Overhead = null);
+    [property: JsonPropertyName("cost")][property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] MonitorCostStatus? Cost = null,
+    [property: JsonPropertyName("overhead")][property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] MonitorOverheadStatus? Overhead = null);
 
 public sealed record MonitorTargetsStatus(
     [property: JsonPropertyName("local")] bool Local,
@@ -861,7 +861,7 @@ public sealed record MonitorRecentRequestItem(
     [property: JsonPropertyName("elapsedMs")] double ElapsedMs,
     [property: JsonPropertyName("statusCode")] int? StatusCode,
     [property: JsonPropertyName("success")] bool Success,
-    [property: JsonPropertyName("rawPromptTokens")] [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RawPromptTokens = null);
+    [property: JsonPropertyName("rawPromptTokens")][property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RawPromptTokens = null);
 
 public sealed record MonitorOverheadRecommendation(
     [property: JsonPropertyName("model")] string Model,

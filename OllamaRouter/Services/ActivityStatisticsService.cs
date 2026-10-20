@@ -163,7 +163,7 @@ public class ActivityStatisticsService : IActivityStatisticsService
                 {
                     today = new ActivityStatisticsDate()
                     {
-                         Date = date
+                        Date = date
                     };
                     all.Add(today);
 
@@ -247,7 +247,7 @@ public class ActivityStatisticsDate
 {
     public DateTime Date { get; set; }
 
-    public Dictionary<RoutingTarget, ActivityStatisticsEntry> Statistics { get; set; } = new ()
+    public Dictionary<RoutingTarget, ActivityStatisticsEntry> Statistics { get; set; } = new()
     {
         [RoutingTarget.Local] = new ActivityStatisticsEntry(),
         [RoutingTarget.Remote] = new ActivityStatisticsEntry(),

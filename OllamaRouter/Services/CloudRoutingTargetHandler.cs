@@ -18,7 +18,7 @@ public sealed class CloudRoutingTargetHandler(
     /// Since Cloud serves as an overflow target that handles concurrent requests without
     /// single-GPU concurrency constraints, it is always available as long as it is enabled.
     /// </summary>
-    public bool IsAvailable() =>  IsEnabled;
+    public bool IsAvailable() => IsEnabled;
 
     public Task<bool> CanProcessAsync(RoutingContext context, CancellationToken cancellationToken = default)
     {
