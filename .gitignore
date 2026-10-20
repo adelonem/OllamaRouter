@@ -432,3 +432,17 @@ FodyWeavers.xsd
 # NightCodeForge task artifacts and transcripts
 docs/tasks/
 docs/transcripts/
+
+# >>> nightcodeforge (managed — do not edit between markers) >>>
+bin/
+obj/
+.vs/
+TestResults/
+*.trx
+docs/tasks/
+docs/transcripts/
+.nightcodeforge/transcripts/
+.nightcodeforge/worktrees/
+.nightcodeforge/logs/
+.nightcodeforge/audit-report.md
+# <<< nightcodeforge <<<
