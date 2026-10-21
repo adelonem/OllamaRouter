@@ -7,7 +7,6 @@ using OllamaRouter.Parsing;
 using OllamaRouter.ReverseProxy;
 using OllamaRouter.Serialization;
 using OllamaRouter.Services;
-using OllamaRouter.Transforms;
 using Yarp.ReverseProxy.Forwarder;
 
 namespace OllamaRouter.Middleware;
@@ -166,17 +165,9 @@ public sealed class OllamaRoutingMiddleware(
             }
         }
 
-        var autoHeal = options.Value.AutoHealToolCalls;
-        if (context.Request.Headers.TryGetValue("X-OllamaRouter-AutoHeal-Tools", out var autoHealHeader) &&
-            bool.TryParse(autoHealHeader.ToString(), out var requestedAutoHeal))
-        {
-            autoHeal = requestedAutoHeal;
-        }
-
         var originalBody = context.Response.Body;
         var capturingStream = new ResponseCapturingStream(originalBody);
-        var healingStream = new ToolCallHealingResponseStream(capturingStream, context, autoHeal, logger);
-        context.Response.Body = healingStream;
+        context.Response.Body = capturingStream;
 
         var requestId = activityMonitor.StartRequest(target, modelName, tokenCount);
         var stopwatch = Stopwatch.StartNew();
@@ -186,7 +177,6 @@ public sealed class OllamaRoutingMiddleware(
         try
         {
             await next(context);
-            await healingStream.FinishAsync();
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
